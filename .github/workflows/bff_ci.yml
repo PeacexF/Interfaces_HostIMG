@@ -1,0 +1,117 @@
+name: BFF CI [HostIMG interface]
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/backend/**", ".github/workflows/web-backend-ci.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["web/backend/**", ".github/workflows/web-backend-ci.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: web/backend
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/backend/go.mod
+          cache: true
+          cache-dependency-path: web/backend/go.sum
+      - run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+      - run: go vet ./...
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/backend/go.mod
+          cache: true
+          cache-dependency-path: web/backend/go.sum
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/backend/go.mod
+          cache: true
+          cache-dependency-path: web/backend/go.sum
+      - run: go build ./...
+      - run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-backend-coverage
+          path: web/backend/coverage.out
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: interfaces_web_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d interfaces_web_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DSN: postgres://postgres:postgres@localhost:5432/interfaces_web_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/backend/go.mod
+          cache: true
+          cache-dependency-path: web/backend/go.sum
+      - run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+      - run: migrate -path db/migrations -database "$TEST_DATABASE_DSN" up
+      - run: go test -tags=integration ./... -run Integration -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: web/backend
+          push: false
+          tags: interfaces-web-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
