@@ -1,4 +1,4 @@
-name: BFF CI [HostIMG interface]
+name: Web Backend CI [HostIMG interface]
 
 on:
   push:
